@@ -13,6 +13,32 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::task::JoinHandle;
 
+pub fn get_device_info(device: &str) -> Result<DeviceInfo, anyhow::Error> {
+	if let Some(value) = DEVICES.get(device) {
+		return Ok(value.clone());
+	}
+
+	let settings = crate::store::get_settings()?;
+	let Some(default_device) = settings.value.default_device else {
+		return Err(anyhow!("device not found"));
+	};
+	if default_device.id != device {
+		return Err(anyhow!("device not found"));
+	}
+
+	Ok(DeviceInfo {
+		id: default_device.id,
+		plugin: String::new(),
+		name: default_device.name,
+		rows: default_device.rows,
+		columns: default_device.columns,
+		encoders: default_device.encoders,
+		touchpoints: default_device.touchpoints,
+		r#type: default_device.r#type,
+		connected: false,
+	})
+}
+
 pub struct ProfileStores {
 	stores: HashMap<String, Store<Profile>>,
 }
@@ -27,7 +53,9 @@ impl ProfileStores {
 	}
 
 	pub fn get_profile_store(&self, device: &DeviceInfo, id: &str) -> Result<&Store<Profile>, anyhow::Error> {
-		self.stores.get(&Self::canonical_id(&device.id, id)).ok_or_else(|| anyhow!("profile not found"))
+		self.stores
+			.get(&Self::canonical_id(&device.id, id))
+			.ok_or_else(|| anyhow!("profile not found for device {} with id {}", device.id, id))
 	}
 
 	pub async fn get_profile_store_mut(&mut self, device: &DeviceInfo, id: &str) -> Result<&mut Store<Profile>, anyhow::Error> {
@@ -219,6 +247,103 @@ impl DeviceStores {
 	}
 }
 
+fn profile_file_id(filename: &str) -> Option<String> {
+	let mut id = filename.to_owned();
+	if id.ends_with(".json") {
+		id.truncate(id.len() - 5);
+	} else if id.ends_with(".json.bak") {
+		id.truncate(id.len() - 9);
+	} else if id.ends_with(".json.temp") {
+		id.truncate(id.len() - 10);
+	} else {
+		return None;
+	}
+	Some(id)
+}
+
+pub fn has_real_device_profiles(device: &str) -> Result<bool, anyhow::Error> {
+	let device_path = config_dir().join("profiles").join(device);
+	if !device_path.exists() {
+		return Ok(false);
+	}
+
+	for entry in fs::read_dir(device_path)? {
+		let entry = entry?;
+		if entry.metadata()?.is_file() && profile_file_id(&entry.file_name().to_string_lossy()).is_some() {
+			return Ok(true);
+		} else if entry.metadata()?.is_dir() {
+			for subentry in fs::read_dir(entry.path())?.flatten() {
+				if subentry.metadata()?.is_file() && profile_file_id(&subentry.file_name().to_string_lossy()).is_some() {
+					return Ok(true);
+				}
+			}
+		}
+	}
+
+	Ok(false)
+}
+
+pub async fn apply_default_device_profiles(target: &DeviceInfo) -> Result<(), anyhow::Error> {
+	if has_real_device_profiles(&target.id)? {
+		return Ok(());
+	}
+
+	let settings = crate::store::get_settings()?;
+	let Some(default_device) = settings.value.default_device else {
+		return Ok(());
+	};
+	if default_device.id == target.id {
+		return Ok(());
+	}
+	if default_device.rows != target.rows
+		|| default_device.columns != target.columns
+		|| default_device.encoders != target.encoders
+		|| default_device.touchpoints != target.touchpoints
+		|| default_device.r#type != target.r#type
+	{
+		return Ok(());
+	}
+	if !has_real_device_profiles(&default_device.id)? {
+		return Ok(());
+	}
+
+	let pending_saves = PROFILE_SAVE_DEBOUNCE
+		.iter()
+		.filter(|entry| entry.key().device == default_device.id)
+		.map(|entry| entry.key().clone())
+		.collect::<Vec<_>>();
+	if !pending_saves.is_empty() && DEVICES.contains_key(&default_device.id) {
+		for context in &pending_saves {
+			if let Some((_, handle)) = PROFILE_SAVE_DEBOUNCE.remove(context) {
+				handle.abort();
+			}
+		}
+		let mut locks = acquire_locks_mut().await;
+		save_profile(&default_device.id, &mut locks).await?;
+	}
+
+	let config_dir = config_dir();
+	let source_profiles = config_dir.join("profiles").join(&default_device.id);
+	let target_profiles = config_dir.join("profiles").join(&target.id);
+	copy_dir(&source_profiles, &target_profiles).context("Failed to copy default device profiles")?;
+
+	let source_images = config_dir.join("images").join(&default_device.id);
+	if source_images.exists() {
+		let target_images = config_dir.join("images").join(&target.id);
+		copy_dir(&source_images, &target_images).context("Failed to copy default device images")?;
+	}
+
+	let mut device_stores = DEVICE_STORES.write().await;
+	let source_selected = device_stores.get_selected_profile(&default_device.id)?;
+	if get_device_profiles(&target.id)?.contains(&source_selected) {
+		device_stores.set_selected_profile(&target.id, source_selected)?;
+	}
+
+	log::info!("Applied default device profiles from {} to {}", default_device.id, target.id);
+
+	Ok(())
+}
+
 pub fn get_device_profiles(device: &str) -> Result<Vec<String>, anyhow::Error> {
 	let mut profiles: Vec<String> = vec![];
 
@@ -228,32 +353,16 @@ pub fn get_device_profiles(device: &str) -> Result<Vec<String>, anyhow::Error> {
 
 	for entry in entries.flatten() {
 		if entry.metadata()?.is_file() {
-			let mut id = entry.file_name().to_string_lossy().into_owned();
-			if id.ends_with(".json") {
-				id.truncate(id.len() - 5);
-			} else if id.ends_with(".json.bak") {
-				id.truncate(id.len() - 9);
-			} else if id.ends_with(".json.temp") {
-				id.truncate(id.len() - 10);
-			} else {
-				continue;
+			if let Some(id) = profile_file_id(&entry.file_name().to_string_lossy()) {
+				profiles.push(id);
 			}
-			profiles.push(id);
 		} else if entry.metadata()?.is_dir() {
 			let entries = fs::read_dir(entry.path())?;
 			for subentry in entries.flatten() {
-				if subentry.metadata()?.is_file() {
-					let mut id = format!("{}/{}", entry.file_name().to_string_lossy(), &subentry.file_name().to_string_lossy());
-					if id.ends_with(".json") {
-						id.truncate(id.len() - 5);
-					} else if id.ends_with(".json.bak") {
-						id.truncate(id.len() - 9);
-					} else if id.ends_with(".json.temp") {
-						id.truncate(id.len() - 10);
-					} else {
-						continue;
-					}
-					profiles.push(id);
+				if subentry.metadata()?.is_file()
+					&& let Some(id) = profile_file_id(&subentry.file_name().to_string_lossy())
+				{
+					profiles.push(format!("{}/{}", entry.file_name().to_string_lossy(), id));
 				}
 			}
 		}
@@ -296,7 +405,7 @@ pub async fn acquire_locks_mut() -> LocksMut<'static> {
 }
 
 pub async fn get_slot<'a>(context: &crate::shared::Context, locks: &'a Locks<'_>) -> Result<&'a Option<crate::shared::ActionInstance>, anyhow::Error> {
-	let device = DEVICES.get(&context.device).ok_or_else(|| anyhow!("device not found"))?;
+	let device = get_device_info(&context.device)?;
 	let store = locks.profile_stores.get_profile_store(&device, &context.profile)?;
 
 	let configured = match &context.controller[..] {
@@ -308,7 +417,7 @@ pub async fn get_slot<'a>(context: &crate::shared::Context, locks: &'a Locks<'_>
 }
 
 pub async fn get_slot_mut<'a>(context: &crate::shared::Context, locks: &'a mut LocksMut<'_>) -> Result<&'a mut Option<crate::shared::ActionInstance>, anyhow::Error> {
-	let device = DEVICES.get(&context.device).ok_or_else(|| anyhow!("device not found"))?;
+	let device = get_device_info(&context.device)?;
 	let store = locks.profile_stores.get_profile_store_mut(&device, &context.profile).await?;
 
 	let configured = match &context.controller[..] {
@@ -353,7 +462,7 @@ pub async fn get_instance_mut<'a>(context: &crate::shared::ActionContext, locks:
 
 pub async fn save_profile(device: &str, locks: &mut LocksMut<'_>) -> Result<(), anyhow::Error> {
 	let selected_profile = locks.device_stores.get_selected_profile(device)?;
-	let device = DEVICES.get(device).ok_or_else(|| anyhow!("device not found"))?;
+	let device = get_device_info(device)?;
 	let store = locks.profile_stores.get_profile_store(&device, &selected_profile)?;
 	store.save()
 }

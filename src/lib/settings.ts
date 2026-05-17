@@ -11,6 +11,15 @@ export type Settings = {
 	separatewine: boolean;
 	developer: boolean;
 	disableelgato: boolean;
+	default_device: {
+		id: string;
+		name: string;
+		rows: number;
+		columns: number;
+		encoders: number;
+		touchpoints: number;
+		type: number;
+	} | null;
 };
 
 import { invoke } from "@tauri-apps/api/core";

@@ -42,7 +42,9 @@ pub async fn create_instance(app: AppHandle, action: Action, context: Context) -
 
 		save_profile(&context.device, &mut locks).await?;
 		drop(locks);
-		let _ = crate::events::outbound::will_appear::will_appear(&instance).await;
+		if crate::shared::DEVICES.contains_key(&context.device) {
+			let _ = crate::events::outbound::will_appear::will_appear(&instance).await;
+		}
 
 		let locks = acquire_locks().await;
 		let slot = get_slot(&context, &locks).await?.clone();
@@ -65,7 +67,9 @@ pub async fn create_instance(app: AppHandle, action: Action, context: Context) -
 		let slot = slot.clone();
 
 		save_profile(&context.device, &mut locks).await?;
-		let _ = crate::events::outbound::will_appear::will_appear(&instance).await;
+		if crate::shared::DEVICES.contains_key(&context.device) {
+			let _ = crate::events::outbound::will_appear::will_appear(&instance).await;
+		}
 
 		Ok(slot)
 	}
@@ -134,13 +138,17 @@ pub async fn move_instance(source: Context, destination: Context, retain: bool) 
 	if !retain {
 		let src = get_slot_mut(&source, &mut locks).await?;
 		if let Some(old) = src {
-			let _ = crate::events::outbound::will_appear::will_disappear(old, true).await;
+			if crate::shared::DEVICES.contains_key(&source.device) {
+				let _ = crate::events::outbound::will_appear::will_disappear(old, true).await;
+			}
 			let _ = remove_dir_all(instance_images_dir(&old.context)).await;
 		}
 		*src = None;
 	}
 
-	let _ = crate::events::outbound::will_appear::will_appear(&new).await;
+	if crate::shared::DEVICES.contains_key(&destination.device) {
+		let _ = crate::events::outbound::will_appear::will_appear(&new).await;
+	}
 
 	save_profile(&destination.device, &mut locks).await?;
 
@@ -156,10 +164,14 @@ pub async fn remove_instance(context: ActionContext) -> Result<(), Error> {
 	};
 
 	if instance.context == context {
-		let _ = crate::events::outbound::will_appear::will_disappear(instance, true).await;
+		if crate::shared::DEVICES.contains_key(&context.device) {
+			let _ = crate::events::outbound::will_appear::will_disappear(instance, true).await;
+		}
 		if let Some(children) = &instance.children {
 			for child in children {
-				let _ = crate::events::outbound::will_appear::will_disappear(child, true).await;
+				if crate::shared::DEVICES.contains_key(&context.device) {
+					let _ = crate::events::outbound::will_appear::will_disappear(child, true).await;
+				}
 				let _ = remove_dir_all(instance_images_dir(&child.context)).await;
 			}
 		}
@@ -169,7 +181,9 @@ pub async fn remove_instance(context: ActionContext) -> Result<(), Error> {
 		let children = instance.children.as_mut().unwrap();
 		for (index, instance) in children.iter().enumerate() {
 			if instance.context == context {
-				let _ = crate::events::outbound::will_appear::will_disappear(instance, true).await;
+				if crate::shared::DEVICES.contains_key(&context.device) {
+					let _ = crate::events::outbound::will_appear::will_disappear(instance, true).await;
+				}
 				let _ = remove_dir_all(instance_images_dir(&instance.context)).await;
 				children.remove(index);
 				break;
@@ -216,12 +230,17 @@ pub async fn set_state(context: ActionContext, index: u16, state: ActionState) -
 	reference.states[index as usize] = state;
 	let clone = reference.clone();
 	save_profile(&context.device, &mut locks).await?;
-	crate::events::outbound::states::title_parameters_did_change(&clone, index).await?;
+	if crate::shared::DEVICES.contains_key(&context.device) {
+		crate::events::outbound::states::title_parameters_did_change(&clone, index).await?;
+	}
 	Ok(())
 }
 
 #[command]
 pub async fn update_image(context: Context, image: Option<String>) {
+	if !crate::shared::DEVICES.contains_key(&context.device) {
+		return;
+	}
 	if Some(&context.profile) != crate::store::profiles::DEVICE_STORES.write().await.get_selected_profile(&context.device).ok().as_ref() {
 		return;
 	}
@@ -233,6 +252,10 @@ pub async fn update_image(context: Context, image: Option<String>) {
 
 #[command]
 pub async fn trigger_virtual_press(context: Context) -> Result<(), Error> {
+	if !crate::shared::DEVICES.contains_key(&context.device) {
+		return Ok(());
+	}
+
 	let event = || crate::events::inbound::PayloadEvent {
 		payload: crate::events::inbound::devices::PressPayload {
 			device: context.device.clone(),

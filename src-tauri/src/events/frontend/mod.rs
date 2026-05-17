@@ -53,14 +53,40 @@ pub async fn restart(app: tauri::AppHandle) {
 	app.restart();
 }
 
+async fn devices_for_frontend() -> HashMap<String, DeviceInfo> {
+	let mut devices = DEVICES.iter().map(|entry| (entry.key().clone(), entry.value().clone())).collect::<HashMap<_, _>>();
+
+	if let Ok(settings) = crate::store::get_settings()
+		&& let Some(default_device) = settings.value.default_device
+		&& !devices.contains_key(&default_device.id)
+	{
+		devices.insert(
+			default_device.id.clone(),
+			DeviceInfo {
+				id: default_device.id,
+				plugin: String::new(),
+				name: default_device.name,
+				rows: default_device.rows,
+				columns: default_device.columns,
+				encoders: default_device.encoders,
+				touchpoints: default_device.touchpoints,
+				r#type: default_device.r#type,
+				connected: false,
+			},
+		);
+	}
+
+	devices
+}
+
 #[command]
-pub async fn get_devices() -> dashmap::DashMap<String, DeviceInfo> {
-	DEVICES.clone()
+pub async fn get_devices() -> HashMap<String, DeviceInfo> {
+	devices_for_frontend().await
 }
 
 pub async fn update_devices() {
 	let app = crate::APP_HANDLE.get().unwrap();
-	let _ = app.get_webview_window("main").unwrap().emit("devices", DEVICES.clone());
+	let _ = app.get_webview_window("main").unwrap().emit("devices", devices_for_frontend().await);
 }
 
 #[command]

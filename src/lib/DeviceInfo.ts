@@ -6,4 +6,5 @@ export type DeviceInfo = {
 	encoders: number;
 	touchpoints: number;
 	type: number;
+	connected: boolean;
 };

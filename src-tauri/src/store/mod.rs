@@ -108,6 +108,17 @@ where
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct DefaultDevice {
+	pub id: String,
+	pub name: String,
+	pub rows: u8,
+	pub columns: u8,
+	pub encoders: u8,
+	pub touchpoints: u8,
+	pub r#type: u8,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
 	pub version: String,
@@ -122,6 +133,7 @@ pub struct Settings {
 	pub separatewine: bool,
 	pub developer: bool,
 	pub disableelgato: bool,
+	pub default_device: Option<DefaultDevice>,
 }
 
 impl Default for Settings {
@@ -140,6 +152,7 @@ impl Default for Settings {
 			separatewine: false,
 			developer: false,
 			disableelgato: false,
+			default_device: None,
 		}
 	}
 }

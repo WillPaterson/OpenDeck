@@ -39,6 +39,8 @@ pub struct DeviceInfo {
 	#[serde_inline_default(0)]
 	pub touchpoints: u8,
 	pub r#type: u8,
+	#[serde_inline_default(true)]
+	pub connected: bool,
 }
 
 pub static DEVICES: LazyLock<DashMap<String, DeviceInfo>> = LazyLock::new(DashMap::new);

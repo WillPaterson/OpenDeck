@@ -2,12 +2,16 @@ use super::PayloadEvent;
 
 use crate::plugins::DEVICE_NAMESPACES;
 use crate::shared::DEVICES;
-use crate::store::profiles::get_device_profiles;
+use crate::store::profiles::{apply_default_device_profiles, get_device_profiles};
 
 use serde::Deserialize;
 
 pub async fn register_device(uuid: &str, mut event: PayloadEvent<crate::shared::DeviceInfo>) -> Result<(), anyhow::Error> {
 	if uuid.is_empty() || Some(uuid) == DEVICE_NAMESPACES.read().await.get(&event.payload.id[..2]).map(|x| x.as_str()) {
+		if let Err(error) = apply_default_device_profiles(&event.payload).await {
+			log::error!("Failed to apply default device profiles to {}: {error}", event.payload.id);
+		}
+
 		if let Ok(profiles) = get_device_profiles(&event.payload.id) {
 			let mut profile_stores = crate::store::profiles::PROFILE_STORES.write().await;
 			for profile in profiles {
